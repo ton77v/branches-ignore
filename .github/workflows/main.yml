@@ -1,0 +1,17 @@
+name: CI Flow
+
+on:
+  pull_request:
+    # https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#example-excluding-branches
+    branches-ignore:
+      - 'mona/octocat'
+      - 'releases/**-alpha'
+
+jobs:
+  set_up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo Content
+        uses: actions/checkout@v4
+      - name: Hello World
+        run: echo "Hello World from $(echo ${GITHUB_REF#refs/heads/})"
