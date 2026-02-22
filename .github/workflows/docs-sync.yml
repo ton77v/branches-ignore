@@ -1,0 +1,53 @@
+name: Self-learning skills sync
+
+on:
+  pull_request:
+    types: [closed]
+
+env:
+  MODEL: opus
+  ALLOWED_TOOLS: >-
+    Bash(git diff*),Bash(git log*),Bash(git show*),Bash(git merge-base*),
+    Bash(git add*),Bash(git commit*),Bash(git push*),Bash(git checkout*),
+    Read,Edit,Write
+
+jobs:
+  docs-sync:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md#inputs
+      - name: Run docs sync
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model ${{ env.MODEL }}
+            --allowedTools "${{ env.ALLOWED_TOOLS }}"
+          prompt: |
+            You are running an automated docs sync after PR #${{ env.PR_NUMBER }} ("${{ env.PR_TITLE }}") was merged to ${{ env.BASE_REF }}.
+
+            Follow the docs_sync workflow from `.claude/commands/docs_sync.md` with these overrides:
+            - Base branch: use `${{ env.BASE_REF }}~1` as merge-base ref (the commit before merge)
+            - Compare: changes introduced by the merged PR only
+            - Mode: --fix (apply changes directly, no confirmation needed)
+            - If no documentation updates are needed, exit silently with success
+
+            If updates are needed:
+            1. Apply edits to the relevant documentation files
+            2. Stage and commit with message: "[docs-sync] update docs for PR #${{ env.PR_NUMBER }}"
+            3. Push to ${{ env.BASE_REF }}
+
+            Do NOT create empty commits. Only commit if files actually changed.
