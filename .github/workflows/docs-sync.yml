@@ -18,6 +18,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+      id-token: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
