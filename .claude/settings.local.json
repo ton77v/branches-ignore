@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(gh api:*)",
-      "Bash(python -c \"import sys,base64; sys.stdout.write\\(base64.b64decode\\(sys.stdin.read\\(\\)\\).decode\\(\\)\\)\")"
+      "Bash(python -c \"import sys,base64; sys.stdout.write\\(base64.b64decode\\(sys.stdin.read\\(\\)\\).decode\\(\\)\\)\")",
+      "WebSearch"
     ]
   }
 }
