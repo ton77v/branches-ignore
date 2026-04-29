@@ -1,0 +1,116 @@
+name: "Version validate"
+
+# Read-only validator. Replaces the in-CI bumper (#224 follow-up).
+# All version decisions happen client-side via pre-commit (scripts/auto_bump.py
+# wired into .git/hooks/pre-commit.d/20-bump.sh by `just setup-hooks`).
+#
+# This workflow only ASSERTS — it never writes or pushes. So:
+#   - no PAT needed (no race vs CI re-trigger)
+#   - works on fork PRs (no auth on write-back)
+#   - no transient red runs from auto-recovery dance
+#
+# Checks (any failure blocks the PR):
+#   1. head.pyproject.version > base.pyproject.version (strict)
+#   2. uv lock --check passes (lockfile in sync with pyproject)
+#   3. no other open PR (same repo) shares head.pyproject.version (collision)
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  validate:
+    if: github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need base ref for comparison
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v6
+
+      - name: Read head + base versions
+        id: versions
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_BRANCH" --quiet
+
+          read_version() {
+            python -c "import tomllib,sys; print(tomllib.loads(sys.stdin.read())['project']['version'])"
+          }
+
+          HEAD=$(read_version < pyproject.toml)
+          BASE=$(git show "origin/${BASE_BRANCH}:pyproject.toml" | read_version)
+
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Head: $HEAD | Base: $BASE"
+
+      - name: Strict head > base
+        env:
+          HEAD: ${{ steps.versions.outputs.head }}
+          BASE: ${{ steps.versions.outputs.base }}
+        run: |
+          python - <<PY
+          import sys
+          def parse(v): return tuple(int(p) for p in v.split("."))
+          head, base = "${HEAD}", "${BASE}"
+          if parse(head) <= parse(base):
+              sys.exit(
+                  f"pyproject version {head!r} must be strictly greater than base {base!r}.\n"
+                  f"Run a fresh commit locally — the pre-commit hook (just setup-hooks) will bump it.\n"
+                  f"If you bypassed the hook with --no-verify: rebase onto base and recommit."
+              )
+          print(f"OK: {head} > {base}")
+          PY
+
+      - name: Lockfile strict (uv lock --check)
+        run: |
+          if ! uv lock --check 2>&1; then
+            echo "uv.lock is out of sync with pyproject.toml."
+            echo "Run 'uv lock' locally and commit. The pre-commit hook does this automatically when pyproject.toml is staged."
+            exit 1
+          fi
+          echo "OK: uv.lock is in sync"
+
+      - name: Cross-PR version collision check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD: ${{ steps.versions.outputs.head }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Other open PRs in this repo (skip fork PRs — different repo, different head ref).
+          # Cross-fork collisions are rare and reviewed manually.
+          mapfile -t prs < <(
+            gh pr list --state open --json number,headRefName,headRepository \
+              --jq ".[] | select(.headRepository.name == \"${{ github.event.repository.name }}\") | select(.number != ${SELF_PR}) | .headRefName"
+          )
+
+          collision=""
+          for ref in "${prs[@]}"; do
+            other=$(gh api "repos/${{ github.repository }}/contents/pyproject.toml?ref=${ref}" --jq '.content' \
+              | base64 -d \
+              | python -c "import tomllib,sys; print(tomllib.loads(sys.stdin.read())['project']['version'])" 2>/dev/null) \
+              || continue
+            if [ "$other" = "$HEAD" ]; then
+              collision="${collision}  - branch ${ref} (also at ${other})\n"
+            fi
+          done
+
+          if [ -n "$collision" ]; then
+            printf "Version %s collides with other open PR(s):\n%b" "$HEAD" "$collision"
+            echo "Resolve by rebasing onto the latest base — the pre-commit hook will bump to the next free version."
+            exit 1
+          fi
+          echo "OK: No version collisions across open PRs"
