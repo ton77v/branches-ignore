@@ -3,23 +3,30 @@
 # dependencies = []
 # ///
 """
-Pre-commit hook: keep pyproject.toml version > origin/main and uv.lock in sync.
+Bump pyproject.toml version above the base branch + keep uv.lock in sync.
+
+Used by the in-CI bumper (.github/workflows/version-bump.yml) to produce
+a single atomic commit per PR (vs. apowis's 3-push flow). Also runnable
+locally for sanity checks.
 
 Behaviour
 ---------
-- If `pyproject.version <= origin/main:pyproject.version`: bump patch, run `uv lock`,
-  stage both files. First divergent commit on a branch carries the bump.
-- Else if pyproject.toml is staged (deps changed): re-run `uv lock`, stage uv.lock.
+- If `pyproject.version <= base:pyproject.version`: bump patch + re-lock.
+- Else if uv.lock is out of sync (manual bump forgot `uv lock`): re-lock.
 - Else: no-op.
 
-Replaces the in-CI bumper (#224 follow-up). All version decisions happen
-client-side, sequentially, before push — so CI becomes a read-only validator.
+Flags
+-----
+--base <ref>   Base ref like "origin/main". Auto-detected via symbolic-ref
+               or origin/main|master fallback when omitted.
+--no-stage     Skip `git add` (caller does its own commit; CI uses this).
 
 Skipped quietly when:
-- not a git repo / pyproject.toml absent
-- origin/main unreachable (fresh clone, detached state, etc.) — CI will still validate
+- pyproject.toml absent
+- base ref unreachable (fresh clone, etc.)
 """
 
+import argparse
 import re
 import subprocess
 import sys
@@ -97,11 +104,17 @@ def is_staged(path: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def lockfile_in_sync() -> bool:
+    """`uv lock --check` — exit 0 if lockfile matches pyproject.toml."""
+    result = subprocess.run(["uv", "lock", "--check"], capture_output=True)
+    return result.returncode == 0
+
+
 def write_version(new: str) -> None:
     text = PYPROJECT.read_text(encoding="utf-8")
     new_text, n = VERSION_LINE.subn(rf'\1"{new}"', text, count=1)
     if n != 1:
-        raise RuntimeError("Could not find a `version = \"X.Y.Z\"` line to rewrite")
+        raise RuntimeError('Could not find a `version = "X.Y.Z"` line to rewrite')
     PYPROJECT.write_text(new_text, encoding="utf-8")
 
 
@@ -114,31 +127,38 @@ def stage(*paths: str) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default=None, help="Base ref (e.g. origin/main); auto-detect if omitted")
+    parser.add_argument("--no-stage", action="store_true", help="Skip git add (caller commits separately)")
+    args = parser.parse_args()
+
     if not PYPROJECT.exists():
         return 0
 
     head = read_version(PYPROJECT.read_text(encoding="utf-8"))
-    ref = base_ref()
+    ref = args.base or base_ref()
     base = fetch_base_version(ref)
 
     if base is None:
-        print(
-            f"auto_bump: {ref} unreachable — skipping (CI will validate)",
-            file=sys.stderr,
-        )
+        print(f"auto_bump: {ref} unreachable — skipping", file=sys.stderr)
         return 0
 
-    pyproject_dirty = is_staged("pyproject.toml")
+    needs_lock = is_staged("pyproject.toml")
 
     if parse(head) <= parse(base):
         new = bump_patch(head)
         write_version(new)
         print(f"auto_bump: {head} -> {new} (was <= base {base})", file=sys.stderr)
-        pyproject_dirty = True
+        needs_lock = True
+    elif not needs_lock and not lockfile_in_sync():
+        # Catches the "manual bump forgot uv lock" case in CI's clean checkout.
+        print("auto_bump: lockfile out of sync with pyproject.toml — re-locking", file=sys.stderr)
+        needs_lock = True
 
-    if pyproject_dirty:
+    if needs_lock:
         run_uv_lock()
-        stage("pyproject.toml", "uv.lock")
+        if not args.no_stage:
+            stage("pyproject.toml", "uv.lock")
 
     return 0
 

@@ -1,0 +1,68 @@
+name: "Version bumper"
+
+# Atomic single-push bumper (#224 follow-up).
+#
+# Replaces apowis/pyproject-bump-version (which auto-committed via
+# EndBug/add-and-commit and produced 3 separate pushes per PR — bump,
+# format, lockfile — each triggering a Coolify staging deploy).
+#
+# This workflow:
+#   1. Maybe bumps pyproject.version (only if head <= base)
+#   2. Re-locks uv.lock if it drifted from pyproject.toml
+#   3. Runs taplo fmt
+#   4. ONE commit + push at the end (or no-op if nothing changed)
+#
+# So: 1 push max per PR open/sync = 1 staging deploy.
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  bump-version:
+    if: github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          # PAT so the resulting push can re-trigger CI on the bumped commit.
+          # GITHUB_TOKEN-pushed commits are skipped by GitHub anti-loop guard.
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v6
+
+      - name: Maybe bump version + re-lock
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          uv run scripts/auto_bump.py --base "origin/${BASE_BRANCH}" --no-stage
+
+      - name: Format pyproject.toml
+        run: uv tool run taplo fmt pyproject.toml
+
+      - name: Commit & push if changed (atomic)
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml uv.lock
+          if git diff --cached --quiet; then
+            echo "No changes — already in sync"
+          else
+            git commit -m "chore: bump version + lockfile [skip ci]"
+            git push
+          fi
